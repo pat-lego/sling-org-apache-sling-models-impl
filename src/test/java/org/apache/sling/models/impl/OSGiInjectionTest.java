@@ -39,10 +39,15 @@ import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.osgi.framework.Bundle;
 import org.osgi.framework.BundleContext;
 import org.osgi.framework.BundleListener;
+import org.osgi.framework.Constants;
+import org.osgi.framework.ServiceEvent;
+import org.osgi.framework.ServiceListener;
 import org.osgi.framework.ServiceReference;
 
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -54,6 +59,8 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
@@ -70,11 +77,13 @@ class OSGiInjectionTest {
 
     private SlingBindings bindings = new SlingBindings();
 
+    private OSGiServiceInjector injectorFactory;
+
     @BeforeEach
     void setup() {
         factory = AdapterFactoryTest.createModelAdapterFactory(bundleContext);
 
-        OSGiServiceInjector injectorFactory = new OSGiServiceInjector();
+        injectorFactory = new OSGiServiceInjector();
         injectorFactory.activate(bundleContext);
         factory.injectors = Collections.singletonList(injectorFactory);
 
@@ -231,11 +240,164 @@ class OSGiInjectionTest {
         assertNull(model);
 
         verify(bundleContext).registerService(eq(Runnable.class), eq(factory), any(Dictionary.class));
-        verify(bundleContext).addBundleListener(any(BundleListener.class));
+        // one bundle listener from the ModelAdapterFactory, one from the OSGiServiceInjector reference cache
+        verify(bundleContext, times(2)).addBundleListener(any(BundleListener.class));
+        verify(bundleContext).addServiceListener(any(ServiceListener.class));
         verify(bundleContext).registerService(eq(Object.class), any(Object.class), any(Dictionary.class));
         verify(bundleContext).getBundles();
         verify(bundleContext).getBundle();
         verifyNoMoreInteractions(res, bundleContext);
+    }
+
+    @Test
+    @SuppressWarnings({"null"})
+    void testServicesAreCachedAcrossModelInstances() throws Exception {
+        ServiceReference<?> ref = registeredReference();
+        ServiceInterface service = mock(ServiceInterface.class);
+        when(bundleContext.getServiceReferences(ServiceInterface.class.getName(), null))
+                .thenReturn(new ServiceReference[] {ref});
+        doReturn(service).when(bundleContext).getService(ref);
+
+        for (int i = 0; i < 3; i++) {
+            SimpleOSGiModel model = factory.getAdapter(mock(Resource.class), SimpleOSGiModel.class);
+            assertNotNull(model);
+            assertEquals(service, model.getService());
+        }
+
+        // the registry is queried and the service obtained once, and the service is kept (not released per model)
+        verify(bundleContext, times(1)).getServiceReferences(ServiceInterface.class.getName(), null);
+        verify(bundleContext, times(1)).getService(ref);
+        verify(bundleContext, never()).ungetService(ref);
+    }
+
+    @Test
+    @SuppressWarnings({"null"})
+    void testCachedServicesAreInjectedIntoCollections() throws Exception {
+        ServiceReference<?> ref1 = registeredReference();
+        ServiceInterface service1 = mock(ServiceInterface.class);
+        doReturn(service1).when(bundleContext).getService(ref1);
+        ServiceReference<?> ref2 = registeredReference();
+        ServiceInterface service2 = mock(ServiceInterface.class);
+        doReturn(service2).when(bundleContext).getService(ref2);
+        when(bundleContext.getServiceReferences(ServiceInterface.class.getName(), null))
+                .thenReturn(new ServiceReference[] {ref1, ref2});
+
+        for (int i = 0; i < 2; i++) {
+            ListOSGiModel model = factory.getAdapter(mock(Resource.class), ListOSGiModel.class);
+            assertNotNull(model);
+            assertThat(model.getServices(), Matchers.containsInAnyOrder(service1, service2));
+        }
+
+        verify(bundleContext, times(1)).getServiceReferences(ServiceInterface.class.getName(), null);
+        verify(bundleContext, times(1)).getService(ref1);
+        verify(bundleContext, times(1)).getService(ref2);
+    }
+
+    @Test
+    @SuppressWarnings({"null"})
+    void testServiceEventEvictsCachedServiceReferences() throws Exception {
+        ArgumentCaptor<ServiceListener> listener = ArgumentCaptor.forClass(ServiceListener.class);
+        verify(bundleContext).addServiceListener(listener.capture());
+
+        ServiceReference<?> ref1 = registeredReference();
+        ServiceInterface service1 = mock(ServiceInterface.class);
+        doReturn(service1).when(bundleContext).getService(ref1);
+        ServiceReference<?> ref2 = registeredReference();
+        ServiceInterface service2 = mock(ServiceInterface.class);
+        doReturn(service2).when(bundleContext).getService(ref2);
+        when(bundleContext.getServiceReferences(ServiceInterface.class.getName(), null))
+                .thenReturn(new ServiceReference[] {ref1})
+                .thenReturn(new ServiceReference[] {ref2});
+
+        assertEquals(
+                service1,
+                factory.getAdapter(mock(Resource.class), SimpleOSGiModel.class).getService());
+        assertEquals(
+                service1,
+                factory.getAdapter(mock(Resource.class), SimpleOSGiModel.class).getService());
+
+        // a new service is registered under the injected service interface
+        when(ref2.getProperty(Constants.OBJECTCLASS)).thenReturn(new String[] {ServiceInterface.class.getName()});
+        listener.getValue().serviceChanged(new ServiceEvent(ServiceEvent.REGISTERED, ref2));
+
+        assertEquals(
+                service2,
+                factory.getAdapter(mock(Resource.class), SimpleOSGiModel.class).getService());
+        verify(bundleContext, times(2)).getServiceReferences(ServiceInterface.class.getName(), null);
+        verify(bundleContext, times(1)).getService(ref1);
+    }
+
+    @Test
+    @SuppressWarnings({"null"})
+    void testUnregisteringServiceReleasesCachedService() throws Exception {
+        ArgumentCaptor<ServiceListener> listener = ArgumentCaptor.forClass(ServiceListener.class);
+        verify(bundleContext).addServiceListener(listener.capture());
+
+        ServiceReference<?> ref = registeredReference();
+        ServiceInterface service = mock(ServiceInterface.class);
+        when(bundleContext.getServiceReferences(ServiceInterface.class.getName(), null))
+                .thenReturn(new ServiceReference[] {ref})
+                .thenReturn(null);
+        doReturn(service).when(bundleContext).getService(ref);
+        assertNotNull(factory.getAdapter(mock(Resource.class), SimpleOSGiModel.class));
+
+        when(ref.getProperty(Constants.OBJECTCLASS)).thenReturn(new String[] {ServiceInterface.class.getName()});
+        listener.getValue().serviceChanged(new ServiceEvent(ServiceEvent.UNREGISTERING, ref));
+
+        verify(bundleContext).ungetService(ref);
+        assertNull(factory.getAdapter(mock(Resource.class), SimpleOSGiModel.class));
+        verify(bundleContext, times(2)).getServiceReferences(ServiceInterface.class.getName(), null);
+    }
+
+    @Test
+    @SuppressWarnings({"null"})
+    void testUnregisteredCachedServiceReferenceIsEvicted() throws Exception {
+        ServiceReference<?> ref = registeredReference();
+        ServiceInterface service = mock(ServiceInterface.class);
+        when(bundleContext.getServiceReferences(ServiceInterface.class.getName(), null))
+                .thenReturn(new ServiceReference[] {ref})
+                .thenReturn(null);
+        doReturn(service).when(bundleContext).getService(ref);
+        assertNotNull(factory.getAdapter(mock(Resource.class), SimpleOSGiModel.class));
+
+        // the service is unregistered, but its reference is still cached (e.g. looked up while it was unregistering)
+        doReturn(null).when(ref).getBundle();
+        doReturn(null).when(bundleContext).getService(ref);
+
+        assertNull(factory.getAdapter(mock(Resource.class), SimpleOSGiModel.class));
+        // the cached service object was released and the reference evicted
+        verify(bundleContext).ungetService(ref);
+        assertNull(factory.getAdapter(mock(Resource.class), SimpleOSGiModel.class));
+        verify(bundleContext, times(2)).getServiceReferences(ServiceInterface.class.getName(), null);
+    }
+
+    @Test
+    @SuppressWarnings({"null"})
+    void testDeactivationReleasesCachedServicesAndStopsCaching() throws Exception {
+        ServiceReference<?> ref = registeredReference();
+        ServiceInterface service = mock(ServiceInterface.class);
+        when(bundleContext.getServiceReferences(ServiceInterface.class.getName(), null))
+                .thenReturn(new ServiceReference[] {ref});
+        doReturn(service).when(bundleContext).getService(ref);
+        assertNotNull(factory.getAdapter(mock(Resource.class), SimpleOSGiModel.class));
+
+        injectorFactory.deactivate();
+        verify(bundleContext).removeServiceListener(any(ServiceListener.class));
+        verify(bundleContext).removeBundleListener(any(BundleListener.class));
+        verify(bundleContext).ungetService(ref);
+
+        // without the cache, every model looks up and gets the service (released by its disposal callback)
+        assertNotNull(factory.getAdapter(mock(Resource.class), SimpleOSGiModel.class));
+        assertNotNull(factory.getAdapter(mock(Resource.class), SimpleOSGiModel.class));
+        verify(bundleContext, times(3)).getServiceReferences(ServiceInterface.class.getName(), null);
+        verify(bundleContext, times(3)).getService(ref);
+    }
+
+    private static ServiceReference<?> registeredReference() {
+        ServiceReference<?> ref = mock(ServiceReference.class);
+        // ServiceReference.getBundle() returns the registering bundle as long as the service is registered
+        lenient().doReturn(mock(Bundle.class)).when(ref).getBundle();
+        return ref;
     }
 
     @Test

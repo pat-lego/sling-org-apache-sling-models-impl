@@ -25,7 +25,6 @@ import java.lang.reflect.Type;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.List;
 
 import org.apache.commons.lang3.StringUtils;
@@ -47,6 +46,7 @@ import org.osgi.framework.InvalidSyntaxException;
 import org.osgi.framework.ServiceReference;
 import org.osgi.service.component.annotations.Activate;
 import org.osgi.service.component.annotations.Component;
+import org.osgi.service.component.annotations.Deactivate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -59,6 +59,17 @@ public class OSGiServiceInjector implements Injector, StaticInjectAnnotationProc
 
     private BundleContext bundleContext;
 
+    /**
+     * Caches the service references and service objects per requesting bundle context, so that injecting a service
+     * does not go through the service registry (and its find hooks) for every model instance.
+     */
+    private final OSGiServiceCache serviceCache = new OSGiServiceCache();
+
+    /**
+     * The cache is only used while it is kept up to date by the service and bundle listeners registered on activation.
+     */
+    private volatile boolean serviceCacheActive;
+
     @Override
     public @NotNull String getName() {
         return "osgi-services";
@@ -67,6 +78,24 @@ public class OSGiServiceInjector implements Injector, StaticInjectAnnotationProc
     @Activate
     public void activate(BundleContext ctx) {
         this.bundleContext = ctx;
+        // keep the service cache up to date: evict on every service change and when a model bundle stops
+        ctx.addServiceListener(serviceCache);
+        ctx.addBundleListener(serviceCache);
+        this.serviceCacheActive = true;
+    }
+
+    @Deactivate
+    public void deactivate() {
+        this.serviceCacheActive = false;
+        if (bundleContext != null) {
+            try {
+                bundleContext.removeServiceListener(serviceCache);
+                bundleContext.removeBundleListener(serviceCache);
+            } catch (IllegalStateException e) {
+                // the bundle context is no longer valid, the framework already removed the listeners
+            }
+        }
+        serviceCache.clear();
     }
 
     @Override
@@ -112,6 +141,65 @@ public class OSGiServiceInjector implements Injector, StaticInjectAnnotationProc
                 adaptable, type, filterString, callbackRegistry, modelContext == null ? bundleContext : modelContext);
     }
 
+    /**
+     * @return the references to the matching services, highest service ranking first (never {@code null})
+     */
+    private ServiceReference<?>[] getServiceReferences(BundleContext modelContext, Class<?> type, String filter)
+            throws InvalidSyntaxException {
+        if (serviceCacheActive) {
+            return serviceCache.getServiceReferences(modelContext, type.getName(), filter);
+        }
+        return OSGiServiceCache.lookup(modelContext, type.getName(), filter);
+    }
+
+    /**
+     * Gets the service object of a reference for the model.
+     * <p>
+     * Services of registered references are taken from the cache, which obtains them once per model bundle and
+     * releases them when they are unregistered. Otherwise (cache not active, or the service of a cached reference was
+     * unregistered in the meantime) the service is obtained from the framework for this model only and released by a
+     * disposal callback, as without the cache.
+     *
+     * @return the service object or {@code null} if the service is not available
+     */
+    private Object getServiceObject(
+            ServiceReference<?> ref,
+            Class<?> type,
+            BundleContext modelContext,
+            List<ServiceReference<?>> refsToRelease) {
+        final boolean registered = ref.getBundle() != null;
+        if (serviceCacheActive && registered) {
+            final Object service = serviceCache.getService(modelContext, ref);
+            if (service != null) {
+                return service;
+            }
+        } else {
+            final Object service = modelContext.getService(ref);
+            if (service != null) {
+                refsToRelease.add(ref);
+                return service;
+            }
+        }
+        if (serviceCacheActive && !registered) {
+            // A cached reference can outlive its service: the UNREGISTERING event (which evicts the cache) is
+            // delivered before the service is removed from the registry, so a concurrent lookup can cache it again.
+            // Evict it once found, so that the next injection looks up the current services.
+            serviceCache.invalidate(type.getName());
+            serviceCache.release(ref);
+        }
+        return null;
+    }
+
+    private static void addDisposalCallback(
+            DisposalCallbackRegistry callbackRegistry,
+            List<ServiceReference<?>> refsToRelease,
+            BundleContext modelContext) {
+        if (!refsToRelease.isEmpty()) {
+            callbackRegistry.addDisposalCallback(
+                    new Callback(refsToRelease.toArray(new ServiceReference[refsToRelease.size()]), modelContext));
+        }
+    }
+
     private <T> Object getService(
             Object adaptable,
             Class<T> type,
@@ -121,17 +209,13 @@ public class OSGiServiceInjector implements Injector, StaticInjectAnnotationProc
         // cannot use SlingScriptHelper since it does not support ordering by service ranking due to
         // https://issues.apache.org/jira/browse/SLING-5665
         try {
-            ServiceReference<?>[] refs = modelContext.getServiceReferences(type.getName(), filter);
-            if (refs != null && refs.length > 0) {
-                // sort by reverse service ranking (highest first) (see ServiceReference.compareTo)
-                List<ServiceReference<?>> references = Arrays.asList(refs);
-                Collections.sort(references, Collections.reverseOrder());
-                for (final ServiceReference<?> ref : references) {
-                    final Object obj = modelContext.getService(ref);
-                    if (obj != null) {
-                        callbackRegistry.addDisposalCallback(new Callback(new ServiceReference[] {ref}, modelContext));
-                        return obj;
-                    }
+            // references are sorted by reverse service ranking (highest first)
+            final List<ServiceReference<?>> refsToRelease = new ArrayList<>(1);
+            for (final ServiceReference<?> ref : getServiceReferences(modelContext, type, filter)) {
+                final Object obj = getServiceObject(ref, type, modelContext, refsToRelease);
+                if (obj != null) {
+                    addDisposalCallback(callbackRegistry, refsToRelease, modelContext);
+                    return obj;
                 }
             }
         } catch (InvalidSyntaxException e) {
@@ -149,23 +233,19 @@ public class OSGiServiceInjector implements Injector, StaticInjectAnnotationProc
         // cannot use SlingScriptHelper since it does not support ordering by service ranking due to
         // https://issues.apache.org/jira/browse/SLING-5665
         try {
-            ServiceReference<?>[] refs = modelContext.getServiceReferences(type.getName(), filter);
-            if (refs != null && refs.length > 0) {
-                // sort by reverse service ranking (highest first) (see ServiceReference.compareTo)
-                List<ServiceReference<?>> references = Arrays.asList(refs);
-                Collections.sort(references, Collections.reverseOrder());
+            // references are sorted by reverse service ranking (highest first)
+            ServiceReference<?>[] references = getServiceReferences(modelContext, type, filter);
+            if (references.length > 0) {
                 List<Object> services = new ArrayList<>();
-                List<ServiceReference<?>> usedRefs = new ArrayList<>();
+                List<ServiceReference<?>> refsToRelease = new ArrayList<>();
                 for (ServiceReference<?> ref : references) {
-                    Object service = modelContext.getService(ref);
+                    Object service = getServiceObject(ref, type, modelContext, refsToRelease);
                     if (service != null) {
                         services.add(service);
-                        usedRefs.add(ref);
                     }
                 }
                 if (!services.isEmpty()) {
-                    callbackRegistry.addDisposalCallback(
-                            new Callback(usedRefs.toArray(new ServiceReference[usedRefs.size()]), modelContext));
+                    addDisposalCallback(callbackRegistry, refsToRelease, modelContext);
                     return services.toArray(new Object[services.size()]);
                 }
             }
