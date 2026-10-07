@@ -44,11 +44,4 @@ public final class OSGiServiceInjectorConfigs {
             }
         };
     }
-
-    /**
-     * @return an injector which ignores the environment of the test JVM
-     */
-    public static OSGiServiceInjector injectorWithoutEnvironment() {
-        return new OSGiServiceInjector(name -> null);
-    }
 }

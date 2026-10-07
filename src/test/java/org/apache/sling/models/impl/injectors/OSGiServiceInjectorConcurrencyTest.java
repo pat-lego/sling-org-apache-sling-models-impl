@@ -106,7 +106,7 @@ class OSGiServiceInjectorConcurrencyTest {
     }
 
     private void activate(boolean serviceCacheEnabled) {
-        injector = OSGiServiceInjectorConfigs.injectorWithoutEnvironment();
+        injector = new OSGiServiceInjector();
         injector.activate(injectorContext, OSGiServiceInjectorConfigs.config(serviceCacheEnabled));
         assertEquals(serviceCacheEnabled, injector.isServiceCacheActive());
     }
@@ -115,47 +115,21 @@ class OSGiServiceInjectorConcurrencyTest {
 
     @Test
     void testServiceCacheIsDisabledByDefault() {
-        assertFalse(OSGiServiceInjector.isServiceCacheEnabled(null, name -> null));
-        assertFalse(OSGiServiceInjector.isServiceCacheEnabled(OSGiServiceInjectorConfigs.config(false), name -> null));
+        // no configuration
+        OSGiServiceInjector unconfigured = new OSGiServiceInjector();
+        unconfigured.activate(injectorContext, null);
+        assertFalse(unconfigured.isServiceCacheActive());
         // the default value of the configuration property
-        OSGiServiceInjector defaultInjector = OSGiServiceInjectorConfigs.injectorWithoutEnvironment();
-        defaultInjector.activate(injectorContext, null);
-        assertFalse(defaultInjector.isServiceCacheActive());
+        OSGiServiceInjector disabled = new OSGiServiceInjector();
+        disabled.activate(injectorContext, OSGiServiceInjectorConfigs.config(false));
+        assertFalse(disabled.isServiceCacheActive());
         assertEquals(0, registry.serviceListenerCount());
         assertEquals(0, registry.bundleListenerCount());
     }
 
     @Test
-    void testServiceCacheIsEnabledByConfiguration() {
-        assertTrue(OSGiServiceInjector.isServiceCacheEnabled(OSGiServiceInjectorConfigs.config(true), name -> null));
-        // the environment variable cannot disable the cache enabled by configuration
-        assertTrue(OSGiServiceInjector.isServiceCacheEnabled(OSGiServiceInjectorConfigs.config(true), name -> "false"));
-    }
-
-    @Test
-    void testServiceCacheIsEnabledByEnvironmentVariable() {
-        for (String value : new String[] {"true", "TRUE", "True", " true "}) {
-            Map<String, String> env = Collections.singletonMap(OSGiServiceInjector.SERVICE_CACHE_ENABLED_ENV, value);
-            assertTrue(OSGiServiceInjector.isServiceCacheEnabled(OSGiServiceInjectorConfigs.config(false), env::get));
-            assertTrue(OSGiServiceInjector.isServiceCacheEnabled(null, env::get));
-        }
-        for (String value : new String[] {"", " ", "false", "FALSE", "1", "yes", "on", "enabled"}) {
-            Map<String, String> env = Collections.singletonMap(OSGiServiceInjector.SERVICE_CACHE_ENABLED_ENV, value);
-            assertFalse(
-                    OSGiServiceInjector.isServiceCacheEnabled(OSGiServiceInjectorConfigs.config(false), env::get),
-                    value);
-        }
-        // only the documented variable is read
-        Map<String, String> other = Collections.singletonMap("SLING_MODELS_SERVICE_CACHE", "true");
-        assertFalse(OSGiServiceInjector.isServiceCacheEnabled(OSGiServiceInjectorConfigs.config(false), other::get));
-    }
-
-    @Test
-    void testEnvironmentVariableActivatesServiceCache() throws Exception {
-        injector = new OSGiServiceInjector(
-                name -> OSGiServiceInjector.SERVICE_CACHE_ENABLED_ENV.equals(name) ? "true" : null);
-        injector.activate(injectorContext, OSGiServiceInjectorConfigs.config(false));
-        assertTrue(injector.isServiceCacheActive());
+    void testServiceCacheIsEnabledByConfiguration() throws Exception {
+        activate(true);
         assertEquals(1, registry.serviceListenerCount());
         assertEquals(1, registry.bundleListenerCount());
 

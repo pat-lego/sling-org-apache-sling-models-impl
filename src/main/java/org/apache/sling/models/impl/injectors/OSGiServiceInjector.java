@@ -26,7 +26,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
-import java.util.function.UnaryOperator;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.sling.models.annotations.Filter;
@@ -60,12 +59,6 @@ public class OSGiServiceInjector implements Injector, StaticInjectAnnotationProc
 
     private static final Logger log = LoggerFactory.getLogger(OSGiServiceInjector.class);
 
-    /**
-     * Environment variable which enables the OSGi service cache when set to {@code true} (case-insensitive), in
-     * addition to the {@link OSGiServiceInjectorConfiguration#service_cache_enabled()} configuration property.
-     */
-    public static final String SERVICE_CACHE_ENABLED_ENV = "SLING_MODELS_OSGI_SERVICE_CACHE_ENABLED";
-
     private BundleContext bundleContext;
 
     /**
@@ -80,22 +73,6 @@ public class OSGiServiceInjector implements Injector, StaticInjectAnnotationProc
      */
     private volatile boolean serviceCacheActive;
 
-    /**
-     * Reads environment variables, replaceable for tests.
-     */
-    private final UnaryOperator<String> environment;
-
-    public OSGiServiceInjector() {
-        this(System::getenv);
-    }
-
-    /**
-     * @param environment returns the value of an environment variable or {@code null} if it is not set
-     */
-    OSGiServiceInjector(@NotNull UnaryOperator<String> environment) {
-        this.environment = environment;
-    }
-
     @Override
     public @NotNull String getName() {
         return "osgi-services";
@@ -104,7 +81,7 @@ public class OSGiServiceInjector implements Injector, StaticInjectAnnotationProc
     @Activate
     public void activate(BundleContext ctx, OSGiServiceInjectorConfiguration config) {
         this.bundleContext = ctx;
-        if (isServiceCacheEnabled(config, environment)) {
+        if (config != null && config.service_cache_enabled()) {
             // keep the service cache up to date: evict on every service change and when a model bundle stops
             ctx.addServiceListener(serviceCache);
             ctx.addBundleListener(serviceCache);
@@ -143,23 +120,6 @@ public class OSGiServiceInjector implements Injector, StaticInjectAnnotationProc
      */
     OSGiServiceCache getServiceCache() {
         return serviceCache;
-    }
-
-    /**
-     * The service cache is enabled by the configuration property or by setting the environment variable
-     * {@value #SERVICE_CACHE_ENABLED_ENV} to {@code true}. It is disabled by default.
-     *
-     * @param config the configuration, may be {@code null}
-     * @param environment returns the value of an environment variable
-     * @return {@code true} if the service cache is enabled
-     */
-    static boolean isServiceCacheEnabled(
-            @Nullable OSGiServiceInjectorConfiguration config, @NotNull UnaryOperator<String> environment) {
-        if (config != null && config.service_cache_enabled()) {
-            return true;
-        }
-        final String value = environment.apply(SERVICE_CACHE_ENABLED_ENV);
-        return value != null && Boolean.parseBoolean(value.trim());
     }
 
     @Override

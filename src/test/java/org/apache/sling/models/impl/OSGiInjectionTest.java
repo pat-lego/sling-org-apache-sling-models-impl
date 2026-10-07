@@ -84,7 +84,7 @@ class OSGiInjectionTest {
     void setup() {
         factory = AdapterFactoryTest.createModelAdapterFactory(bundleContext);
 
-        injectorFactory = OSGiServiceInjectorConfigs.injectorWithoutEnvironment();
+        injectorFactory = new OSGiServiceInjector();
         injectorFactory.activate(bundleContext, OSGiServiceInjectorConfigs.config(true));
         factory.injectors = Collections.singletonList(injectorFactory);
 

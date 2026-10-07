@@ -33,17 +33,14 @@ public @interface OSGiServiceInjectorConfiguration {
      * Enables the OSGi service cache. Disabled by default: every injection then looks up the service references and
      * gets (and later releases) the service objects through the service registry, as in previous versions.
      * <p>
-     * The cache is also enabled when the environment variable
-     * {@value OSGiServiceInjector#SERVICE_CACHE_ENABLED_ENV} is set to {@code true}, regardless of this property.
+     * To toggle it per environment, set the property from an environment variable with the configuration
+     * interpolation of the platform, e.g. {@code $[env:SLING_MODELS_OSGI_SERVICE_CACHE_ENABLED;default=false]}.
      *
      * @return {@code true} to cache the service references and service objects
      */
     @AttributeDefinition(
             name = "Enable OSGi Service Cache",
             description = "Caches the service references and the service objects injected into Sling Models instead"
-                    + " of looking them up in the service registry for every model instance. Disabled by default."
-                    + " The cache is also enabled if the environment variable "
-                    + OSGiServiceInjector.SERVICE_CACHE_ENABLED_ENV
-                    + " is set to 'true'.")
+                    + " of looking them up in the service registry for every model instance. Disabled by default.")
     boolean service_cache_enabled() default false;
 }
