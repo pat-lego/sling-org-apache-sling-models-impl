@@ -63,7 +63,7 @@ final class OSGiServiceCache implements AllServiceListener, SynchronousBundleLis
     private static final ServiceReference<?>[] NO_REFERENCES = new ServiceReference<?>[0];
 
     /**
-     * Service class name &rarr; (requesting bundle context, filter) &rarr; references, highest ranking first.
+     * Service class name =>(requesting bundle context, filter) => references, highest ranking first.
      */
     private final ConcurrentMap<String, ConcurrentMap<LookupKey, ServiceReference<?>[]>> references =
             new ConcurrentHashMap<>();
