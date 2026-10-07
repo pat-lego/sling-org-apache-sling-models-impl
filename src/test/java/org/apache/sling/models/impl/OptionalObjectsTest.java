@@ -69,8 +69,8 @@ class OptionalObjectsTest {
     void setup() {
         factory = AdapterFactoryTest.createModelAdapterFactory();
 
-        osgiInjector = new OSGiServiceInjector();
-        osgiInjector.activate(bundleContext);
+        osgiInjector = OSGiServiceInjectorConfigs.injectorWithoutEnvironment();
+        osgiInjector.activate(bundleContext, OSGiServiceInjectorConfigs.config(false));
 
         BindingsInjector bindingsInjector = new BindingsInjector();
         ValueMapInjector valueMapInjector = new ValueMapInjector();

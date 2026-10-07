@@ -22,6 +22,8 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
@@ -57,6 +59,17 @@ import org.osgi.framework.SynchronousBundleListener;
  * (so the requesting bundle keeps a single usage of the service, like a static Declarative Services reference) and
  * released when the service is unregistered, when the requesting bundle is stopping or when the cache is cleared.</li>
  * </ul>
+ * <p>
+ * The cache is safe for concurrent use: lookups never hold a lock while calling the framework, so they can race with
+ * service and bundle events. Such races are resolved as follows:
+ * <ul>
+ * <li>references looked up while a service event evicts them end up in an evicted map that is never read again;</li>
+ * <li>a service object cached for a service that is unregistering (or for a bundle that is stopping, or after the
+ * cache is closed) concurrently is detected right after it is cached and released again, so that no usage of a
+ * service is leaked;</li>
+ * <li>every cached service object is released exactly once (entries are atomically removed before they are
+ * released).</li>
+ * </ul>
  */
 final class OSGiServiceCache implements AllServiceListener, SynchronousBundleListener {
 
@@ -73,6 +86,26 @@ final class OSGiServiceCache implements AllServiceListener, SynchronousBundleLis
      */
     private final ConcurrentMap<ServiceReference<?>, ConcurrentMap<BundleContext, Object>> services =
             new ConcurrentHashMap<>();
+
+    /**
+     * References of services for which an {@link ServiceEvent#UNREGISTERING} event was received but which may still
+     * be valid ({@link ServiceReference#getBundle()} not yet {@code null}): the framework delivers the event before it
+     * invalidates the reference, so a service object obtained concurrently could otherwise be cached after the event
+     * released the cached ones. Entries are pruned once the reference is invalidated.
+     */
+    private final Set<ServiceReference<?>> unregistering = ConcurrentHashMap.newKeySet();
+
+    /**
+     * Bundle contexts of bundles which are stopping or stopped, so that nothing is cached for them anymore. Weakly
+     * referenced: a restarted bundle gets a new bundle context.
+     */
+    private final Set<BundleContext> stoppingContexts =
+            Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
+
+    /**
+     * Once closed, nothing is cached anymore.
+     */
+    private volatile boolean closed;
 
     /**
      * Returns the references to the services registered under the given class and matching the given filter, as
@@ -98,7 +131,10 @@ final class OSGiServiceCache implements AllServiceListener, SynchronousBundleLis
         ServiceReference<?>[] result = byFilter.get(key);
         if (result == null) {
             result = lookup(context, className, filter);
-            byFilter.putIfAbsent(key, result);
+            if (byFilter.putIfAbsent(key, result) == null && (closed || stoppingContexts.contains(context))) {
+                // do not keep lookups of stopped bundles or of a closed cache
+                byFilter.remove(key, result);
+            }
         }
         return result;
     }
@@ -147,16 +183,30 @@ final class OSGiServiceCache implements AllServiceListener, SynchronousBundleLis
         if (service == null) {
             return null;
         }
-        final Object existing = services.computeIfAbsent(reference, ref -> new ConcurrentHashMap<>())
-                .putIfAbsent(context, service);
+        final ConcurrentMap<BundleContext, Object> cache =
+                services.computeIfAbsent(reference, ref -> new ConcurrentHashMap<>());
+        final Object existing = cache.putIfAbsent(context, service);
         if (existing != null) {
             // another thread obtained and cached the service concurrently, release the additional usage
             ungetService(context, reference);
             return existing;
         }
-        if (reference.getBundle() == null) {
-            // unregistered while it was obtained, possibly after the UNREGISTERING event evicted it: do not keep it
-            release(reference);
+        // The service may have been unregistered (or the bundle stopped, or the cache closed) while it was obtained,
+        // after the corresponding event released the cached service objects: do not keep it. The tombstones are
+        // recorded before the cached service objects are released, so either the event handler or this check sees the
+        // service object that was just cached.
+        if (closed
+                || reference.getBundle() == null
+                || unregistering.contains(reference)
+                || stoppingContexts.contains(context)) {
+            if (cache.remove(context, service)) {
+                ungetService(context, reference);
+            }
+            if (reference.getBundle() == null) {
+                // do not keep an (empty) entry for an unregistered service; safe as every thread caching a service
+                // object for it releases it again (see above)
+                release(reference);
+            }
         }
         return service;
     }
@@ -181,6 +231,14 @@ final class OSGiServiceCache implements AllServiceListener, SynchronousBundleLis
     }
 
     /**
+     * Clears the cache and stops caching: service objects obtained concurrently are released right away.
+     */
+    void close() {
+        closed = true;
+        clear();
+    }
+
+    /**
      * @return the number of cached reference lookups
      */
     int referencesSize() {
@@ -194,9 +252,34 @@ final class OSGiServiceCache implements AllServiceListener, SynchronousBundleLis
         return services.values().stream().mapToInt(Map::size).sum();
     }
 
+    /**
+     * @param context a bundle context
+     * @return the number of cached reference lookups of the given bundle context
+     */
+    int referencesSize(@NotNull BundleContext context) {
+        return (int) references.values().stream()
+                .flatMap(byFilter -> byFilter.keySet().stream())
+                .filter(key -> key.context == context)
+                .count();
+    }
+
+    /**
+     * @param context a bundle context
+     * @return the number of service objects cached for the given bundle context
+     */
+    int servicesSize(@NotNull BundleContext context) {
+        return (int) services.values().stream()
+                .filter(byContext -> byContext.containsKey(context))
+                .count();
+    }
+
     @Override
     public void serviceChanged(ServiceEvent event) {
         final ServiceReference<?> reference = event.getServiceReference();
+        if (!unregistering.isEmpty()) {
+            // references which are invalidated in the meantime are detected by ServiceReference.getBundle()
+            unregistering.removeIf(ref -> ref.getBundle() == null);
+        }
         final Object objectClass = reference.getProperty(Constants.OBJECTCLASS);
         if (objectClass instanceof String[]) {
             for (final String className : (String[]) objectClass) {
@@ -205,6 +288,8 @@ final class OSGiServiceCache implements AllServiceListener, SynchronousBundleLis
         }
         // a modified service keeps its service objects, only its (ranking, filter matching) references may change
         if (event.getType() == ServiceEvent.UNREGISTERING) {
+            // record the tombstone before releasing, see getService
+            unregistering.add(reference);
             release(reference);
         }
     }
@@ -214,6 +299,8 @@ final class OSGiServiceCache implements AllServiceListener, SynchronousBundleLis
         if (event.getType() == BundleEvent.STOPPING) {
             final BundleContext stopping = event.getBundle().getBundleContext();
             if (stopping != null) {
+                // record the tombstone before releasing, see getService
+                stoppingContexts.add(stopping);
                 for (final ConcurrentMap<LookupKey, ServiceReference<?>[]> byFilter : references.values()) {
                     byFilter.keySet().removeIf(key -> key.context == stopping);
                 }
@@ -236,7 +323,10 @@ final class OSGiServiceCache implements AllServiceListener, SynchronousBundleLis
         final ConcurrentMap<BundleContext, Object> byContext = services.remove(reference);
         if (byContext != null) {
             for (final BundleContext context : byContext.keySet()) {
-                ungetService(context, reference);
+                // remove atomically: a concurrent getService may release the same entry (see getService)
+                if (byContext.remove(context) != null) {
+                    ungetService(context, reference);
+                }
             }
         }
     }

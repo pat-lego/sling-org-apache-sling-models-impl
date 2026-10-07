@@ -26,6 +26,7 @@ import org.apache.sling.api.resource.Resource;
 import org.apache.sling.api.scripting.SlingBindings;
 import org.apache.sling.api.scripting.SlingScriptHelper;
 import org.apache.sling.models.impl.injectors.OSGiServiceInjector;
+import org.apache.sling.models.impl.injectors.OSGiServiceInjectorConfigs;
 import org.apache.sling.models.testmodels.classes.ArrayOSGiModel;
 import org.apache.sling.models.testmodels.classes.CollectionOSGiModel;
 import org.apache.sling.models.testmodels.classes.ListOSGiModel;
@@ -83,8 +84,8 @@ class OSGiInjectionTest {
     void setup() {
         factory = AdapterFactoryTest.createModelAdapterFactory(bundleContext);
 
-        injectorFactory = new OSGiServiceInjector();
-        injectorFactory.activate(bundleContext);
+        injectorFactory = OSGiServiceInjectorConfigs.injectorWithoutEnvironment();
+        injectorFactory.activate(bundleContext, OSGiServiceInjectorConfigs.config(true));
         factory.injectors = Collections.singletonList(injectorFactory);
 
         bindings.setSling(helper);

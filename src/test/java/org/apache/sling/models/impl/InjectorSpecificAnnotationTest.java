@@ -32,6 +32,7 @@ import org.apache.sling.api.wrappers.ValueMapDecorator;
 import org.apache.sling.models.impl.injectors.BindingsInjector;
 import org.apache.sling.models.impl.injectors.ChildResourceInjector;
 import org.apache.sling.models.impl.injectors.OSGiServiceInjector;
+import org.apache.sling.models.impl.injectors.OSGiServiceInjectorConfigs;
 import org.apache.sling.models.impl.injectors.RequestAttributeInjector;
 import org.apache.sling.models.impl.injectors.ValueMapInjector;
 import org.apache.sling.models.impl.via.BeanPropertyViaProvider;
@@ -77,8 +78,8 @@ class InjectorSpecificAnnotationTest {
     void setup() {
         factory = AdapterFactoryTest.createModelAdapterFactory();
 
-        osgiInjector = new OSGiServiceInjector();
-        osgiInjector.activate(bundleContext);
+        osgiInjector = OSGiServiceInjectorConfigs.injectorWithoutEnvironment();
+        osgiInjector.activate(bundleContext, OSGiServiceInjectorConfigs.config(false));
 
         BindingsInjector bindingsInjector = new BindingsInjector();
         ValueMapInjector valueMapInjector = new ValueMapInjector();
